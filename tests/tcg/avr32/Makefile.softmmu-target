@@ -1,0 +1,33 @@
+#
+# AVR32 system tests
+#
+
+AVR32_SRC = $(SRC_PATH)/tests/tcg/avr32
+AVR32_SYSTEM_SRC = $(AVR32_SRC)/system
+VPATH += $(AVR32_SRC)
+VPATH += $(AVR32_SYSTEM_SRC)
+
+LINK_SCRIPT = $(AVR32_SRC)/linker.ld
+CRT_OBJS = boot.o
+
+AVR32_MULTIARCH_TESTS = hello
+TESTS += cpu-smoke insn-arith insn-branch insn-shift insn-load-store
+TESTS += $(AVR32_MULTIARCH_TESTS)
+MULTIARCH_TESTS =
+
+QEMU_OPTS += -M avr32example-board -bios
+CFLAGS += -std=gnu99 -O2 -nostdlib -ffreestanding -fno-builtin
+CFLAGS += -fno-stack-protector -fomit-frame-pointer -Wall -Wextra -Werror
+CFLAGS += $(MINILIB_INC)
+LDFLAGS = -nostdlib -nostartfiles -Wl,-T,$(LINK_SCRIPT) -Wl,--build-id=none
+LDFLAGS += $(CRT_OBJS) $(MINILIB_OBJS) -lgcc
+CLEANFILES += *.elf *.map *.out
+
+%.o: %.c
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
+
+$(TESTS:%=%.elf): %.elf: %.c $(LINK_SCRIPT) $(CRT_OBJS) $(MINILIB_OBJS)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $< -o $@ $(LDFLAGS) -Wl,-Map,$*.map
+
+$(TESTS): %: %.elf
+	$(OBJCOPY) -O binary $< $@

@@ -58,6 +58,12 @@ typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 #define AVR32EXP_USART0_BASE 0xffe00c00
 #define AVR32EXP_USART_STRIDE 0x400
 #define AVR32EXP_USART_SIZE 0x400
+#define AVR32EXP_TEST_EXIT_BASE 0xfffff000
+#define AVR32EXP_TEST_EXIT_SIZE 0x1000
+#define AVR32EXP_TEST_EXIT_RESULT 0x00
+#define AVR32EXP_TEST_EXIT_EXPECTED 0x04
+#define AVR32EXP_TEST_EXIT_STATUS 0x08
+#define AVR32EXP_TEST_PASS 0x600dca7e
 
 #define AVR32EXP_INTC_INTPR_BASE 0x000
 #define AVR32EXP_INTC_INTREQ_BASE 0x100
@@ -107,6 +113,58 @@ typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 
 DECLARE_CLASS_CHECKERS(AVR32EXPMcuClass, AVR32EXP_MCU,
         TYPE_AVR32EXP_MCU)
+
+static uint64_t avr32exp_test_exit_read(void *opaque, hwaddr offset,
+                                        unsigned size)
+{
+    AVR32EXPMcuState *s = opaque;
+
+    switch (offset) {
+    case AVR32EXP_TEST_EXIT_RESULT:
+        return s->test_result;
+    case AVR32EXP_TEST_EXIT_EXPECTED:
+        return s->test_expected;
+    default:
+        return 0;
+    }
+}
+
+static void avr32exp_test_exit_write(void *opaque, hwaddr offset,
+                                     uint64_t value, unsigned size)
+{
+    AVR32EXPMcuState *s = opaque;
+    uint32_t val = value;
+
+    switch (offset) {
+    case AVR32EXP_TEST_EXIT_RESULT:
+        s->test_result = val;
+        return;
+    case AVR32EXP_TEST_EXIT_EXPECTED:
+        s->test_expected = val;
+        return;
+    case AVR32EXP_TEST_EXIT_STATUS:
+        fprintf(stderr,
+                "avr32exp-test-exit: status=0x%08x result=0x%08x expected=0x%08x\n",
+                val, s->test_result, s->test_expected);
+        exit(val == AVR32EXP_TEST_PASS ? 0 : 1);
+    default:
+        return;
+    }
+}
+
+static const MemoryRegionOps avr32exp_test_exit_ops = {
+    .read = avr32exp_test_exit_read,
+    .write = avr32exp_test_exit_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
 
 static int avr32exp_intc_irq_level(AVR32EXPMcuState *mcu, unsigned irq)
 {
@@ -500,6 +558,7 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
                            "sram", mc->sram_size, &error_fatal);
     memory_region_add_subregion(get_system_memory(),
                                 AVR32EXP_SRAM_BASE, &s->sram);
+    s->cpu.env.r[AVR32A_SP_REG] = AVR32EXP_SRAM_BASE + mc->sram_size;
 
     /* Linux for AT32AP700x expects SDRAM at 0x10000000 and executes
      * through AVR32's P1/P2 virtual aliases while this target still uses
@@ -553,6 +612,12 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
     qemu_chr_fe_set_handlers(&s->usart[1].chr, avr32exp_usart_can_receive,
                              avr32exp_usart_receive, NULL, NULL,
                              &s->usart[1], NULL, true);
+
+    memory_region_init_io(&s->test_exit, OBJECT(dev),
+                          &avr32exp_test_exit_ops, s, "test-exit",
+                          AVR32EXP_TEST_EXIT_SIZE);
+    memory_region_add_subregion(get_system_memory(),
+                                AVR32EXP_TEST_EXIT_BASE, &s->test_exit);
 }
 
 static void avr32exp_class_init(ObjectClass *oc, void *data)

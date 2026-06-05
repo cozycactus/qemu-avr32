@@ -67,6 +67,9 @@ struct AVR32EXPMcuState {
     uint32_t intc_intreq[33];
     int intc_pending_irq;
     AVR32EXPUSARTState usart[4];
+    MemoryRegion test_exit;
+    uint32_t test_result;
+    uint32_t test_expected;
 };
 
 #endif // HW_AVR32_AVR32EXPC_H

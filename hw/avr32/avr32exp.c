@@ -43,6 +43,8 @@ struct AVR32EXPMcuClass {
 
 typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 
+#define AVR32EXP_FLASH_BASE 0x80000000
+
 DECLARE_CLASS_CHECKERS(AVR32EXPMcuClass, AVR32EXP_MCU,
         TYPE_AVR32EXP_MCU)
 
@@ -61,7 +63,7 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
     memory_region_init_rom(&s->flash, OBJECT(dev),
                            "flash", mc->flash_size, &error_fatal);
     memory_region_add_subregion(get_system_memory(),
-                                0xd0000000, &s->flash);
+                                AVR32EXP_FLASH_BASE, &s->flash);
 }
 
 static void avr32exp_class_init(ObjectClass *oc, void *data)

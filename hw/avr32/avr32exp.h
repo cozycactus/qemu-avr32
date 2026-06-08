@@ -37,6 +37,7 @@ struct AVR32EXPMcuState {
     /*< public >*/
     AVR32ACPU cpu;
     MemoryRegion flash;
+    MemoryRegion sram;
 };
 
 #endif // HW_AVR32_AVR32EXPC_H

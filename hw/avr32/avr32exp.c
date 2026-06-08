@@ -39,11 +39,13 @@ struct AVR32EXPMcuClass {
     const char *cpu_type;
 
     size_t flash_size;
+    size_t sram_size;
 };
 
 typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 
 #define AVR32EXP_FLASH_BASE 0x80000000
+#define AVR32EXP_SRAM_BASE 0x00000000
 
 DECLARE_CLASS_CHECKERS(AVR32EXPMcuClass, AVR32EXP_MCU,
         TYPE_AVR32EXP_MCU)
@@ -64,6 +66,12 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
                            "flash", mc->flash_size, &error_fatal);
     memory_region_add_subregion(get_system_memory(),
                                 AVR32EXP_FLASH_BASE, &s->flash);
+
+    /* SRAM */
+    memory_region_init_ram(&s->sram, OBJECT(dev),
+                           "sram", mc->sram_size, &error_fatal);
+    memory_region_add_subregion(get_system_memory(),
+                                AVR32EXP_SRAM_BASE, &s->sram);
 }
 
 static void avr32exp_class_init(ObjectClass *oc, void *data)
@@ -80,6 +88,7 @@ static void avr32exps_class_init(ObjectClass *oc, void *data){
 
     avr32exp->cpu_type = AVR32A_CPU_TYPE_NAME("AVR32EXPC");
     avr32exp->flash_size = 1024 * KiB;
+    avr32exp->sram_size = 64 * KiB;
 }
 
 static const TypeInfo avr32exp_mcu_types[] = {

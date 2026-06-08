@@ -2819,7 +2819,7 @@ static bool trans_RCALL_f2(DisasContext *ctx, arg_RCALL_f2 *a){
         disp |= 0xFFE00000;
     }
     disp = disp << 1;
-    tcg_gen_addi_i32(cpu_r[AVR32A_LR_REG], cpu_r[AVR32A_PC_REG], 2);
+    tcg_gen_addi_i32(cpu_r[AVR32A_LR_REG], cpu_r[AVR32A_PC_REG], 4);
     tcg_gen_addi_i32(cpu_r[AVR32A_PC_REG], cpu_r[AVR32A_PC_REG], disp);
 
     ctx->base.is_jmp = DISAS_JUMP;

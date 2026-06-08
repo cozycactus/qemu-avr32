@@ -1722,7 +1722,8 @@ static bool trans_LDM(DisasContext *ctx, arg_LDM *a){
             if(((reglist >> 14) & 1) == 0 && ((reglist >> 12) &1) == 0){
                 tcg_gen_movi_i32(cpu_r[12], 0);
             }
-            else if((reglist >> 14) == 0 && (reglist >> 12) == 1){
+            else if(((reglist >> 14) & 1) == 0 &&
+                    ((reglist >> 12) & 1) == 1){
                 tcg_gen_movi_i32(cpu_r[12], 1);
             }
             else{

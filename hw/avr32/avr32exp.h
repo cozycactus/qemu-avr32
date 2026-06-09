@@ -21,6 +21,7 @@
 #define HW_AVR32_AVR32EXPC_H
 
 #include "target/avr32/cpu.h"
+#include "chardev/char-fe.h"
 #include "qom/object.h"
 #include "hw/sysbus.h"
 
@@ -30,6 +31,23 @@
 typedef struct AVR32EXPMcuState AVR32EXPMcuState;
 DECLARE_INSTANCE_CHECKER(AVR32EXPMcuState, AVR32EXP_MCU, TYPE_AVR32EXP_MCU)
 
+typedef struct AVR32EXPUSARTState {
+    MemoryRegion iomem;
+    CharBackend chr;
+    struct AVR32EXPMcuState *mcu;
+    uint32_t imr;
+    uint32_t rpr;
+    uint32_t rcr;
+    uint32_t tpr;
+    uint32_t tcr;
+    uint32_t rnpr;
+    uint32_t rncr;
+    uint32_t tnpr;
+    uint32_t tncr;
+    uint32_t ptsr;
+    unsigned irq;
+} AVR32EXPUSARTState;
+
 struct AVR32EXPMcuState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -38,6 +56,14 @@ struct AVR32EXPMcuState {
     AVR32ACPU cpu;
     MemoryRegion flash;
     MemoryRegion sram;
+    MemoryRegion ram;
+    MemoryRegion ram_p1_alias;
+    MemoryRegion ram_p2_alias;
+    MemoryRegion intc_iomem;
+    uint32_t intc_intpr[33];
+    uint32_t intc_intreq[33];
+    int intc_pending_irq;
+    AVR32EXPUSARTState usart[4];
 };
 
 #endif // HW_AVR32_AVR32EXPC_H

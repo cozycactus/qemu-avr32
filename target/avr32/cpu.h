@@ -31,6 +31,7 @@
 #define AVR32A_LR_REG 14
 #define AVR32A_SP_REG 13
 #define AVR32A_SYS_REG 256
+#define AVR32_TLB_ENTRIES 64
 
 
 
@@ -69,6 +70,11 @@ static const char avr32_cpu_sr_flag_names[32][8] = {
         "sregM2", "sreg25","sregD","sregDM","sregJ","sregH", "sreg30", "sregSS"
 };
 
+typedef struct AVR32TLBEntry {
+    uint32_t hi;
+    uint32_t lo;
+} AVR32TLBEntry;
+
 typedef struct CPUArchState {
     // Status Register
     uint sr;
@@ -81,6 +87,8 @@ typedef struct CPUArchState {
 
     //System registers
     uint32_t sysr[AVR32A_SYS_REG];
+
+    AVR32TLBEntry tlb[AVR32_TLB_ENTRIES];
 
     //interrupt source
     int intsrc;
@@ -105,7 +113,7 @@ int avr32_print_insn(bfd_vma addr, disassemble_info *info);
 
 static inline int cpu_interrupts_enabled(CPUAVR32AState* env)
 {
-    return AVR32_GM_FLAG(env->sr);
+    return env->sflags[16] == 0;
 }
 
 static inline int cpu_mmu_index(CPUAVR32AState *env, bool ifetch)

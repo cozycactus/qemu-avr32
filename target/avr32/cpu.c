@@ -30,9 +30,19 @@
 static AVR32ACPU * cpu_self;
 static bool first_reset = true;
 
+/* System register indices are encoded as byte offsets divided by four. */
+#define SYSREG_CONFIG0_WORD (0x0100 / 4)
+#define SYSREG_CONFIG1_WORD (0x0104 / 4)
+#define SYSREG_EVBA_WORD (0x0004 / 4)
+#define SYSREG_RSR_INT0_WORD (0x0018 / 4)
+#define SYSREG_RAR_INT0_WORD (0x0038 / 4)
+#define AVR32_SR_GM_BIT 16
+#define AVR32_SR_I0M_BIT 17
+#define AVR32_SR_MODE_SHIFT 22
+#define AVR32_MODE_INT0 2
+
 static void avr32_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
 {
-    printf("[AVR32-DISAS] avr32_cpu_disas_set_info\n");
     info->mach = bfd_arch_avr32;
 }
 
@@ -75,9 +85,6 @@ static void avr32_cpu_realizefn(DeviceState *dev, Error **errp)
 
 static void avr32_cpu_reset(DeviceState *dev)
 {
-    if(!first_reset) {
-        printf("[AVR32-CPU] CPU RESET\n");
-    }
     CPUState *cs = CPU(dev);
     AVR32ACPU *cpu = AVR32A_CPU(cs);
     AVR32ACPUClass* acc = AVR32A_CPU_GET_CLASS(dev);
@@ -107,12 +114,15 @@ static void avr32_cpu_reset(DeviceState *dev)
     for(int i= 0; i< AVR32A_SYS_REG; i++){
         env->sysr[i] = 0;
     }
+    /* Advertise a small shared-TLB core with 32-byte I/D cache lines. */
+    env->sysr[SYSREG_CONFIG0_WORD] = (2u << 7) | 1u;
+    env->sysr[SYSREG_CONFIG1_WORD] = (4u << 3) | (5u << 6)
+                                   | (4u << 13) | (5u << 16);
+    memset(env->tlb, 0, sizeof(env->tlb));
 
     for(int i= 0; i< AVR32A_REG_PAGE_SIZE; i++){
         env->r[i] = 0;
     }
-
-    printf("RESET 2\n");
 
     env->r[AVR32A_PC_REG] = 0x80000000;
     env->r[AVR32A_LR_REG] = 0;
@@ -122,7 +132,7 @@ static void avr32_cpu_reset(DeviceState *dev)
 static ObjectClass* avr32_cpu_class_by_name(const char *cpu_model)
 {
     ObjectClass *oc;
-    printf("[AVR32-TODO] avr32_cpu_class_by_name: %s\n", cpu_model);
+    (void)cpu_model;
     oc = object_class_by_name(AVR32A_CPU_TYPE_NAME("AVR32EXPC"));
     return oc;
 }
@@ -160,7 +170,6 @@ static void avr32_cpu_set_pc(CPUState *cs, vaddr value)
 {
     AVR32ACPU *cpu = AVR32A_CPU(cs);
 
-    printf("[AVR32-CPU] avr32_cpu_set_pc, pc: %04lx\n", value);
     cpu->env.r[AVR32A_PC_REG] = value;
 }
 
@@ -172,8 +181,37 @@ static vaddr avr32_cpu_get_pc(CPUState *cs)
 
 static bool avr32_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    //TODO: Later
-    return false;
+    AVR32ACPU *cpu = AVR32A_CPU(cs);
+    CPUAVR32AState *env = &cpu->env;
+    uint32_t sr = 0;
+    int level = env->intlevel;
+
+    if (!(interrupt_request & CPU_INTERRUPT_HARD) || env->intsrc < 0) {
+        return false;
+    }
+
+    if (!cpu_interrupts_enabled(env)
+        || level < 0 || level > 3
+        || env->sflags[AVR32_SR_I0M_BIT + level]) {
+        return false;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        sr |= (env->sflags[i] & 1) << i;
+    }
+
+    env->sysr[SYSREG_RAR_INT0_WORD + level] = env->r[AVR32A_PC_REG];
+    env->sysr[SYSREG_RSR_INT0_WORD + level] = sr;
+
+    for (int i = 0; i < 3; i++) {
+        env->sflags[AVR32_SR_MODE_SHIFT + i] =
+            ((AVR32_MODE_INT0 + level) >> i) & 1;
+    }
+    env->sflags[AVR32_SR_GM_BIT] = 1;
+
+    env->r[AVR32A_PC_REG] = env->sysr[SYSREG_EVBA_WORD] + env->autovector;
+    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    return true;
 }
 
 static void avr32_restore_state_to_opc(CPUState *cs,
@@ -208,7 +246,6 @@ void avr32_cpu_synchronize_from_tb(CPUState *cs, const TranslationBlock *tb){
 
 static void avr32a_cpu_class_init(ObjectClass *oc, void *data)
 {
-    printf("CPU-INIT!\n");
     AVR32ACPUClass *acc = AVR32A_CPU_CLASS(oc);
     CPUClass *cc = CPU_CLASS(oc);
     DeviceClass *dc = DEVICE_CLASS(oc);

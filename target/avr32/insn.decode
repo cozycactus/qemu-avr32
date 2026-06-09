@@ -66,6 +66,7 @@
 &rp_rs_imm16        rp rs imm16
 &rd_rp_disp3        rd rp disp3
 &rd_rp_cond4_disp9  rd rp cond4 disp9
+&stcond             rp rs disp16
 &mtdr               rs addr
 &rd_rs_cond4        rd rs cond4
 &rd_bp5_sa5         rd bp5 sa5
@@ -127,6 +128,7 @@
 @op_rd_rx_ry_sa     ... rx:4 ..... ry:4 .... .... .. sa:2 rd:4  &rd_rx_ry_sa
 @op_rd_rp_disp3     ... rp:4 .. disp3:3 rd:4                    &rd_rp_disp3
 @op_rd_rp_cond4_disp9 ...  rp:4 ..... rd:4 cond4:4 ... disp9:9  &rd_rp_cond4_disp9
+@op_stcond          ... rp:4 . .... rs:4 disp16:16               &stcond
 @op_mtdr            ... ......... rs:4 ........ addr:8          &mtdr
 @op_rd_rs_cond4     ... rs:4 ..... rd:4 .... .... cond4:4 ....  &rd_rs_cond4
 @op_rd_bp5_sa5      ... .... ..... rd:4 .... .. bp5:5 sa5:5     &rd_bp5_sa5
@@ -205,6 +207,8 @@ CPW_f3          111 .... 0010 . .... ................          @op_rd_imm21
 CPC_f1          111 .... 00000 .... 0001 0011 00000000         @op_rs_rd_32
 CPC_f2          010 1110 00010 ....                            @op_rd
 
+PREF            111100100001 .... ................             @op_rp_disp
+
 CSRF            11010 10 ..... 0011                           @op_bp5
 CSRFCZ          11010 00 ..... 0011                           @op_bp5
 
@@ -218,6 +222,7 @@ EOR_cond  111 .... 11101 .... 1110 .... 0100 ....       @op_rx_ry_cond_rd
 EORH            111 011100001 .... ................           @op_rd_imm16
 EORL            111 011000001 .... ................           @op_rd_imm16
 
+BUG             0101110111110000
 FRS             1101011 10100 0011
 
 ICALL           010 1110 1000 1 ....                          @op_rd
@@ -300,6 +305,7 @@ MEMC            111 101100001 ..... ...............         @op_bp5_imm15
 MEMS_bp5_imm15  111 110000001 ..... ...............         @op_bp5_imm15
 MEMT_bp5_imm15  111 110100001 ..... ...............         @op_bp5_imm15
 
+MFDR            111 001011011 .... 00000000 ........        @op_rd_sr
 MFSR            111 000011011 .... 00000000 ........        @op_rd_sr
 
 # TODO: verify, instruction set reference contains error in opcode
@@ -321,6 +327,7 @@ MUL_f2         111 .... 00000 .... 0000 00100100 ....      @op_rd_rx_ry
 MUL_f3          111 .... 00000 .... 0001 0000 ........      @op_rd_rs_imm8
 
 MULHHW          111 .... 00000 .... 00000111 10 . . ....    @op_rx_ry_x_y_rd
+MULSD           111 .... 00000 .... 0000 01000100 ....      @op_rd_rx_ry
 MULUD           111 .... 00000 .... 0000 01100100 ....      @op_rd_rx_ry
 
 
@@ -364,11 +371,21 @@ SBR             101 .... 1101 . ....                        @op_rd_bp4_bp1
 SCALL           1101011 10011 0011
 SCR             010 111000001 ....                          @op_rd
 
+SWAP_B          010111001011 ....                           @op_rd
+SWAP_BH         010111001100 ....                           @op_rd
+
 SLEEP           111 0100 11011 0000 00000000 ........       @op_op8
+SYNC            1110101110110000 00000000 ........          @op_op8
 
 SR              010 11111 .... ....                         @op_rd_cond4
 
 SSRF            1101001 ..... 0011                          @op_bp5
+
+TLBR            1101011 00100 0011
+TLBS            1101011 00101 0011
+TLBW            1101011 00110 0011
+
+XCHG            111 .... 00000 .... 0000 1011 0100 ....     @op_rd_rx_ry
 
 STB_f1          000 .... 01100 ....                         @op_rp_rs
 STB_f2          000 .... 01111 ....                         @op_rp_rs
@@ -390,6 +407,8 @@ STH_f4          111 .... 10101 .... ................        @op_rp_rs_imm16
 STH_f5          111 .... 00000 .... 0000 1010 00 .. ....    @op_rd_rx_ry_sa
 STHc            111 .... 11111 .... .... 110 .........      @op_rd_rp_cond4_disp9
 STM             111 010 . 11100 .... ................       @op_stm
+STMTS           111 011 . 11100 .... ................       @op_stm
+STCOND          111 .... 1 0111 .... ................        @op_stcond
 
 STW_f1          000 .... 01010 ....                         @op_rp_rs
 STW_f2          000 .... 01101 ....                         @op_rp_rs

@@ -37,6 +37,27 @@
 
 #define SYS_MODE 11
 
+#define SYSREG_EVBA_WORD (0x0004 / 4)
+#define SYSREG_RSR_SUP_WORD (0x0014 / 4)
+#define SYSREG_RSR_EX_WORD (0x0028 / 4)
+#define SYSREG_RAR_SUP_WORD (0x0034 / 4)
+#define SYSREG_RAR_EX_WORD (0x0048 / 4)
+#define SYSREG_COUNT_WORD (0x0108 / 4)
+#define SYSREG_TLBEHI_WORD (0x0110 / 4)
+#define SYSREG_PTBR_WORD (0x0118 / 4)
+#define SYSREG_MMUCR_WORD (0x0120 / 4)
+#define SYSREG_TLBARLO_WORD (0x0124 / 4)
+#define MMUCR_N_BIT 3
+
+#define AVR32_CODE_TLBEHI_VALID (1u << 9)
+#define AVR32_CODE_TLBELO_GLOBAL (1u << 8)
+#define AVR32_CODE_PAGE_MASK 0xfffff000u
+#define AVR32_CODE_PAGE_PRESENT (1u << 10)
+#define AVR32_CODE_P1SEG 0x80000000u
+#define AVR32_CODE_PGDIR_SHIFT 22
+#define AVR32_CODE_PTRS_PER_PTE 1024
+#define AVR32_CODE_ECR_TLB_MISS_X 20
+
 #define MMU_IDX 0
 
 #define sflagC 0
@@ -67,6 +88,51 @@ enum {
 
 typedef struct DisasContext DisasContext;
 
+static void gen_pack_sr(TCGv sr)
+{
+    tcg_gen_movi_i32(sr, 0);
+    for (int i = 31; i >= 0; i--) {
+        tcg_gen_shli_i32(sr, sr, 1);
+        tcg_gen_add_i32(sr, sr, cpu_sflags[i]);
+    }
+}
+
+static void gen_unpack_sr(TCGv sr)
+{
+    for (int i = 0; i < 32; i++) {
+        tcg_gen_shri_i32(cpu_sflags[i], sr, i);
+        tcg_gen_andi_i32(cpu_sflags[i], cpu_sflags[i], 0x1);
+    }
+}
+
+static bool avr32_code_tlb_lookup(CPUAVR32AState *env, uint32_t vaddr,
+                                  hwaddr *paddr)
+{
+    uint32_t asid = env->sysr[SYSREG_TLBEHI_WORD] & 0xff;
+
+    for (unsigned i = 0; i < AVR32_TLB_ENTRIES; i++) {
+        const AVR32TLBEntry *entry = &env->tlb[i];
+
+        if (!(entry->hi & AVR32_CODE_TLBEHI_VALID)) {
+            continue;
+        }
+        if ((entry->hi & AVR32_CODE_PAGE_MASK)
+            != (vaddr & AVR32_CODE_PAGE_MASK)) {
+            continue;
+        }
+        if (!(entry->lo & AVR32_CODE_TLBELO_GLOBAL)
+            && (entry->hi & 0xff) != asid) {
+            continue;
+        }
+
+        *paddr = (entry->lo & AVR32_CODE_PAGE_MASK)
+               | (vaddr & ~AVR32_CODE_PAGE_MASK);
+        return true;
+    }
+
+    return false;
+}
+
 /* This is the state at translation time. */
 struct DisasContext {
     DisasContextBase base;
@@ -76,6 +142,75 @@ struct DisasContext {
 
     uint32_t pc;
 };
+
+static bool avr32_code_read_u32(DisasContext *ctx, hwaddr addr,
+                                uint32_t *value)
+{
+    MemTxResult result;
+
+    *value = address_space_ldl_be(ctx->cs->as, addr, MEMTXATTRS_UNSPECIFIED,
+                                  &result);
+    return result == MEMTX_OK;
+}
+
+static bool avr32_code_page_table_lookup(DisasContext *ctx, uint32_t vaddr,
+                                         hwaddr *paddr)
+{
+    uint32_t ptbr = ctx->env->sysr[SYSREG_PTBR_WORD];
+    uint32_t pgd;
+    uint32_t pte;
+    uint32_t pgd_addr;
+    uint32_t pte_addr;
+    bool pgd_ok;
+    bool pte_ok;
+
+    if (ptbr == 0) {
+        return false;
+    }
+
+    pgd_addr = ptbr + ((vaddr >> AVR32_CODE_PGDIR_SHIFT) * sizeof(uint32_t));
+    pgd_ok = avr32_code_read_u32(ctx, pgd_addr, &pgd);
+    if (!pgd_ok || pgd == 0) {
+        return false;
+    }
+
+    pte_addr = (pgd & AVR32_CODE_PAGE_MASK) | AVR32_CODE_P1SEG;
+    pte_addr += ((vaddr >> 12) & (AVR32_CODE_PTRS_PER_PTE - 1))
+              * sizeof(uint32_t);
+    pte_ok = avr32_code_read_u32(ctx, pte_addr, &pte);
+    if (!pte_ok || !(pte & AVR32_CODE_PAGE_PRESENT)) {
+        return false;
+    }
+
+    *paddr = (pte & AVR32_CODE_PAGE_MASK) | (vaddr & ~AVR32_CODE_PAGE_MASK);
+    return true;
+}
+
+static bool avr32_code_lduw(DisasContext *ctx, uint32_t vaddr,
+                            uint16_t *value)
+{
+    if (vaddr < 0x80000000u) {
+        hwaddr paddr;
+        MemTxResult result;
+        bool hit_tlb;
+        bool hit_pt;
+
+        hit_tlb = avr32_code_tlb_lookup(ctx->env, vaddr, &paddr);
+        hit_pt = !hit_tlb && avr32_code_page_table_lookup(ctx, vaddr, &paddr);
+        if (hit_tlb || hit_pt) {
+            *value = address_space_lduw_be(ctx->cs->as, paddr,
+                                           MEMTXATTRS_UNSPECIFIED, &result);
+            if (result == MEMTX_OK) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    *value = translator_lduw_swap(ctx->env, &ctx->base, vaddr, true);
+    return true;
+}
 
 void avr32_tcg_init(void){
     int i;
@@ -109,10 +244,28 @@ void avr32_tcg_init(void){
 static uint32_t decode_insn_load_bytes(DisasContext *ctx, uint32_t insn,
                                        int i, int n){
     if(i == 0){
-        insn = cpu_lduw_be_data(ctx->env, ctx->base.pc_next + i) << 16;
+        uint16_t half;
+        if (!avr32_code_lduw(ctx, ctx->base.pc_next + i, &half)) {
+            gen_helper_avr32_tlb_miss(cpu_env,
+                                      tcg_constant_i32(ctx->base.pc_next + i),
+                                      tcg_constant_i32(AVR32_CODE_ECR_TLB_MISS_X));
+            ctx->base.is_jmp = DISAS_NORETURN;
+            ctx->base.pc_next += 2;
+            return 0;
+        }
+        insn = half << 16;
     }
     else if (i== 2){
-        insn |= cpu_lduw_be_data(ctx->env, ctx->base.pc_next + i);
+        uint16_t half;
+        if (!avr32_code_lduw(ctx, ctx->base.pc_next + i, &half)) {
+            gen_helper_avr32_tlb_miss(cpu_env,
+                                      tcg_constant_i32(ctx->base.pc_next + i),
+                                      tcg_constant_i32(AVR32_CODE_ECR_TLB_MISS_X));
+            ctx->base.is_jmp = DISAS_NORETURN;
+            ctx->base.pc_next += 2;
+            return 0;
+        }
+        insn |= half;
     }
 
     //No instruction was loaded.
@@ -741,9 +894,16 @@ static bool trans_BST(DisasContext *ctx, arg_BST *a){
     return true;
 }
 
-static bool trans_CACHE(DisasContext *ctx, arg_CACHE *a){
-    //This instruction is implementation specific!
-    return false;
+static bool trans_CACHE(DisasContext *ctx, arg_CACHE *a)
+{
+    ctx->base.pc_next += 4;
+    return true;
+}
+
+static bool trans_PREF(DisasContext *ctx, arg_PREF *a)
+{
+    ctx->base.pc_next += 4;
+    return true;
 }
 
 static bool trans_CASTSB(DisasContext *ctx, arg_CASTSB *a){
@@ -1117,15 +1277,24 @@ static bool trans_EORL(DisasContext *ctx, arg_EORH *a){
     return true;
 }
 
+static bool trans_BUG(DisasContext *ctx, arg_BUG *a)
+{
+    ctx->base.pc_next += 2;
+    return true;
+}
+
 static bool trans_FRS(DisasContext *ctx, arg_FRS *a){
     //Hardware specific instruction.
     ctx->base.pc_next += 2;
-    return false;
+    return true;
 }
 
 static bool trans_ICALL(DisasContext *ctx, arg_ICALL *a){
+    TCGv target = tcg_temp_new_i32();
+
+    tcg_gen_mov_i32(target, cpu_r[a->rd]);
     tcg_gen_addi_i32(cpu_r[LR_REG], cpu_r[PC_REG], 2);
-    tcg_gen_mov_i32(cpu_r[PC_REG], cpu_r[a->rd]);
+    tcg_gen_mov_i32(cpu_r[PC_REG], target);
 
     ctx->base.is_jmp = DISAS_JUMP;
     ctx->base.pc_next += 2;
@@ -1799,8 +1968,12 @@ static bool trans_LDMTS(DisasContext *ctx, arg_LDMTS *a){
     tcg_gen_mov_i32(addr, cpu_r[a->rp]);
 
     for(int i = 15; i >= 0; i--){
-        if((a->list >> i) == 1){
+        if(((a->list >> i) & 1) == 1){
             tcg_gen_qemu_ld_tl(cpu_r[i], addr, 0, MO_BEUL);
+            tcg_gen_addi_i32(addr, addr, 0x4);
+            if (i == PC_REG) {
+                ctx->base.is_jmp = DISAS_JUMP;
+            }
         }
     }
     if(a->op){
@@ -2298,10 +2471,30 @@ static bool trans_MFSR(DisasContext *ctx, arg_MFSR *a){
             tcg_gen_add_i32(sr, sr, cpu_sflags[i]);
         }
     }
+    else if (a->sr == SYSREG_COUNT_WORD) {
+        gen_helper_avr32_count(sr);
+    }
     else{
         tcg_gen_mov_i32(sr, cpu_sysr[a->sr]);
     }
     tcg_gen_mov_i32(cpu_r[a->rd], sr);
+
+    ctx->base.pc_next += 4;
+    return true;
+}
+
+static bool trans_MFDR(DisasContext *ctx, arg_MFDR *a)
+{
+    /*
+     * The current AVR32 model does not emulate on-chip debug hardware.
+     * Linux only records these values during boot, so returning zero is
+     * enough to continue until a real OCD model exists.
+     */
+    tcg_gen_movi_i32(cpu_r[a->rd], 0);
+
+    if (a->rd == PC_REG) {
+        ctx->base.is_jmp = DISAS_JUMP;
+    }
 
     ctx->base.pc_next += 4;
     return true;
@@ -2420,9 +2613,10 @@ static bool trans_MOVH(DisasContext *ctx, arg_MOVH *a){
     return true;
 }
 
-static bool trans_MTDR (DisasContext *ctx, arg_MTDR  *a){
-
-    return false;
+static bool trans_MTDR(DisasContext *ctx, arg_MTDR *a)
+{
+    ctx->base.pc_next += 4;
+    return true;
 }
 
 static bool trans_MTSR (DisasContext *ctx, arg_MTSR  *a){
@@ -2487,6 +2681,17 @@ static bool trans_MULHHW(DisasContext *ctx, arg_MULHHW *a){
     tcg_gen_mul_i32(cpu_r[a->rd], op1, op2);
 
     ctx->base.pc_next +=4;
+    return true;
+}
+
+static bool trans_MULSD(DisasContext *ctx, arg_MULSD *a)
+{
+    TCGv rd = cpu_r[a->rd];
+    TCGv rdp = cpu_r[a->rd + 1];
+
+    tcg_gen_muls2_i32(rd, rdp, cpu_r[a->rx], cpu_r[a->ry]);
+
+    ctx->base.pc_next += 4;
     return true;
 }
 
@@ -2871,69 +3076,7 @@ static bool trans_RET(DisasContext *ctx, arg_RET *a){
 }
 
 static bool trans_RETE(DisasContext *ctx, arg_RETE *a){
-    TCGLabel *if_1 = gen_new_label();
-    TCGLabel *exit = gen_new_label();
-
-    TCGv SP = cpu_r[SP_REG];
-
-    TCGv sr = tcg_temp_new_i32();
-    tcg_gen_qemu_ld_i32(sr, SP, 0x0, MO_BEUL);
-
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[PC_REG], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-
-    TCGv sr_m = tcg_temp_new_i32();
-    // set sr_m to SR[M2:M0]
-    tcg_gen_mov_i32(sr_m, cpu_sflags[24]);
-    tcg_gen_shli_i32(sr_m, sr_m, 1);
-    tcg_gen_add_i32(sr_m, sr_m, cpu_sflags[23]);
-    tcg_gen_shli_i32(sr_m, sr_m, 1);
-    tcg_gen_add_i32(sr_m, sr_m, cpu_sflags[22]);
-
-
-    for(int i= 0; i< 32; i++){
-        tcg_gen_shri_i32(cpu_sflags[i], sr, i);
-        tcg_gen_andi_i32(cpu_sflags[i], cpu_sflags[i], 0x1);
-    }
-
-    // Check if SR[M2:M0] >= 001
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 2, if_1);
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 3, if_1);
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 4, if_1);
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 5, if_1);
-    tcg_gen_br(exit);
-
-    // if
-    gen_set_label(if_1);
-
-    tcg_gen_qemu_ld_i32(cpu_r[LR_REG], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[12], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[11], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[10], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[9], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    tcg_gen_qemu_ld_i32(cpu_r[8], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-
-    // exit
-    gen_set_label(exit);
-
-    tcg_gen_movi_i32(cpu_sflags[sflagL], 0);
-
-    ctx->env->intsrc = 0;
-    ctx->env->intlevel = 0;
+    gen_helper_avr32_rete(cpu_env);
 
     ctx->base.is_jmp = DISAS_JUMP;
     ctx->base.pc_next += 2;
@@ -2969,17 +3112,9 @@ static bool trans_RETS(DisasContext *ctx, arg_RETS *a){
     // else if
     gen_set_label(if_1_else_if);
     TCGv sr = tcg_temp_new_i32();
-    TCGv SP = cpu_r[SP_REG];
-
-    tcg_gen_qemu_ld_i32(sr, SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
-    for(int i= 0; i< 32; i++){
-        tcg_gen_shri_i32(cpu_sflags[i], sr, i);
-        tcg_gen_andi_i32(cpu_sflags[i], cpu_sflags[i], 0x1);
-    }
-
-    tcg_gen_qemu_ld_i32(cpu_r[PC_REG], SP, 0x0, MO_BEUL);
-    tcg_gen_addi_i32(SP, SP, 0x4);
+    tcg_gen_mov_i32(sr, cpu_sysr[SYSREG_RSR_SUP_WORD]);
+    gen_unpack_sr(sr);
+    tcg_gen_mov_i32(cpu_r[PC_REG], cpu_sysr[SYSREG_RAR_SUP_WORD]);
     tcg_gen_br(exit);
 
     //else
@@ -2988,6 +3123,7 @@ static bool trans_RETS(DisasContext *ctx, arg_RETS *a){
 
     // exit
     gen_set_label(exit);
+    gen_helper_avr32_tlb_flush(cpu_env);
     ctx->base.is_jmp = DISAS_JUMP;
 
     ctx->base.pc_next += 2;
@@ -3279,53 +3415,18 @@ static bool trans_SBR(DisasContext *ctx, arg_SBR *a){
 }
 
 static bool trans_SCALL(DisasContext *ctx, arg_SCALL *a){
-    TCGLabel *if_1 = gen_new_label();
-    TCGLabel *if_1_else = gen_new_label();
-    TCGLabel *exit = gen_new_label();
-
-    TCGv sr_m = tcg_temp_new_i32();
-    TCGv temp = tcg_temp_new_i32();
-    tcg_gen_shli_i32(sr_m, cpu_sflags[24], 2);
-    tcg_gen_shli_i32(temp, cpu_sflags[23], 1);
-    tcg_gen_or_i32(sr_m, sr_m, temp);
-    tcg_gen_or_i32(sr_m, sr_m, cpu_sflags[22]);
-
-
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 0, if_1);
-    tcg_gen_brcondi_i32(TCG_COND_EQ, sr_m, 1, if_1);
-    tcg_gen_br(if_1_else);
-
-    // outer if
-    gen_set_label(if_1);
-
     TCGv sr = tcg_temp_new_i32();
-    tcg_gen_movi_i32(sr, 0);
+    gen_pack_sr(sr);
 
-    tcg_gen_addi_i32(temp, cpu_r[PC_REG], 0x2);
-    tcg_gen_subi_i32(cpu_r[SP_REG], cpu_r[SP_REG], 0x4);
-    tcg_gen_qemu_st_i32(temp, cpu_r[SP_REG], 0x0, MO_BEUL);
-
-    for(int i= 0; i< 32; i++){
-        tcg_gen_shli_i32(temp, cpu_sflags[i], i);
-        tcg_gen_or_i32(sr, sr, cpu_sflags[i]);
-    }
-    tcg_gen_subi_i32(cpu_r[SP_REG], cpu_r[SP_REG], 0x4);
-    tcg_gen_qemu_st_i32(sr, cpu_r[SP_REG], 0x0, MO_BEUL);
-
-
-    tcg_gen_addi_i32(cpu_r[PC_REG], cpu_sysr[1], 0x100);
+    tcg_gen_addi_i32(cpu_sysr[SYSREG_RAR_SUP_WORD], cpu_r[PC_REG], 0x2);
+    tcg_gen_mov_i32(cpu_sysr[SYSREG_RSR_SUP_WORD], sr);
+    tcg_gen_addi_i32(cpu_r[PC_REG], cpu_sysr[SYSREG_EVBA_WORD], 0x100);
     tcg_gen_movi_i32(cpu_sflags[22], 0x1);
     tcg_gen_movi_i32(cpu_sflags[23], 0x0);
     tcg_gen_movi_i32(cpu_sflags[24], 0x0);
 
-    tcg_gen_br(exit);
+    gen_helper_avr32_tlb_flush(cpu_env);
 
-    // else
-    gen_set_label(if_1_else);
-    tcg_gen_addi_i32(cpu_r[LR_REG], cpu_r[PC_REG], 0x2);
-    tcg_gen_addi_i32(cpu_r[PC_REG], cpu_sysr[1], 0x100);
-
-    gen_set_label(exit);
     ctx->base.is_jmp = DISAS_JUMP;
     ctx->base.pc_next += 2;
     return true;
@@ -3366,6 +3467,37 @@ static bool trans_SLEEP(DisasContext *ctx, arg_SLEEP *a)
     return false;
 }
 
+static bool trans_SWAP_B(DisasContext *ctx, arg_SWAP_B *a)
+{
+    tcg_gen_bswap32_i32(cpu_r[a->rd], cpu_r[a->rd]);
+
+    ctx->base.pc_next += 2;
+    return true;
+}
+
+static bool trans_SWAP_BH(DisasContext *ctx, arg_SWAP_BH *a)
+{
+    TCGv lo = tcg_temp_new_i32();
+    TCGv hi = tcg_temp_new_i32();
+
+    tcg_gen_andi_i32(lo, cpu_r[a->rd], 0x00ff00ff);
+    tcg_gen_shli_i32(lo, lo, 8);
+    tcg_gen_andi_i32(hi, cpu_r[a->rd], 0xff00ff00);
+    tcg_gen_shri_i32(hi, hi, 8);
+    tcg_gen_or_i32(cpu_r[a->rd], lo, hi);
+
+    ctx->base.pc_next += 2;
+    return true;
+}
+
+static bool trans_SYNC(DisasContext *ctx, arg_SYNC *a)
+{
+    tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
+
+    ctx->base.pc_next += 4;
+    return true;
+}
+
 static bool trans_SR(DisasContext *ctx, arg_SR *a){
     TCGv reg = tcg_temp_new_i32();
     int val = checkCondition(a->cond4, reg, cpu_r, cpu_sflags);
@@ -3378,6 +3510,28 @@ static bool trans_SR(DisasContext *ctx, arg_SR *a){
 
 static bool trans_SSRF(DisasContext *ctx, arg_SSRF *a){
     tcg_gen_movi_i32(cpu_sflags[a->bp5], 0x1);
+
+    ctx->base.pc_next += 2;
+    return true;
+}
+
+static bool trans_TLBR(DisasContext *ctx, arg_TLBR *a)
+{
+    ctx->base.pc_next += 2;
+    return true;
+}
+
+static bool trans_TLBS(DisasContext *ctx, arg_TLBS *a)
+{
+    gen_helper_avr32_tlbs(cpu_env);
+
+    ctx->base.pc_next += 2;
+    return true;
+}
+
+static bool trans_TLBW(DisasContext *ctx, arg_TLBW *a)
+{
+    gen_helper_avr32_tlbw(cpu_env);
 
     ctx->base.pc_next += 2;
     return true;
@@ -3601,7 +3755,36 @@ static bool trans_STHc(DisasContext *ctx, arg_STHc *a){
     return true;
 }
 
-//TODO: Add STCOND
+static bool trans_STCOND(DisasContext *ctx, arg_STCOND *a)
+{
+    TCGv addr = tcg_temp_new_i32();
+    int32_t disp = (int16_t)a->disp16;
+
+    tcg_gen_addi_i32(addr, cpu_r[a->rp], disp);
+    tcg_gen_qemu_st_tl(cpu_r[a->rs], addr, 0, MO_BEUL);
+
+    /* Single-core bring-up model: the store always succeeds. */
+    tcg_gen_movi_i32(cpu_sflags[sflagZ], 1);
+
+    ctx->base.pc_next += 4;
+    return true;
+}
+
+static bool trans_XCHG(DisasContext *ctx, arg_XCHG *a)
+{
+    TCGv old = tcg_temp_new_i32();
+
+    tcg_gen_qemu_ld_i32(old, cpu_r[a->rx], 0, MO_BEUL);
+    tcg_gen_qemu_st_i32(cpu_r[a->ry], cpu_r[a->rx], 0, MO_BEUL);
+    tcg_gen_mov_i32(cpu_r[a->rd], old);
+
+    if (a->rd == PC_REG) {
+        ctx->base.is_jmp = DISAS_JUMP;
+    }
+
+    ctx->base.pc_next += 4;
+    return true;
+}
 
 static bool trans_STDSP(DisasContext *ctx, arg_STDSP *a){
     TCGv ptr = tcg_temp_new_i32();
@@ -3634,8 +3817,37 @@ static bool trans_STM(DisasContext *ctx, arg_STM *a){
         tcg_gen_mov_i32(cpu_r[a->rp], addr);
     }
     else{
-        for (int i = 0; i <= 15; i++){
+        for (int i = 15; i >= 0; i--){
             regFlag = a->list >> i & 1;
+            if(regFlag == 1){
+                tcg_gen_qemu_st_tl(cpu_r[i], addr, 0x00, MO_BEUL);
+                tcg_gen_addi_i32(addr, addr, 0x4);
+            }
+        }
+    }
+
+    ctx->base.pc_next += 4;
+    return true;
+}
+
+static bool trans_STMTS(DisasContext *ctx, arg_STMTS *a){
+    int regFlag = 0;
+    TCGv addr = tcg_temp_new_i32();
+    tcg_gen_mov_i32(addr, cpu_r[a->rp]);
+
+    if(a->op == 1){
+        for (int i = 0; i <= 15; i++){
+            regFlag = (a->list >> i) & 1;
+            if(regFlag == 1){
+                tcg_gen_subi_i32(addr, addr, 0x4);
+                tcg_gen_qemu_st_tl(cpu_r[i], addr, 0x00, MO_BEUL);
+            }
+        }
+        tcg_gen_mov_i32(cpu_r[a->rp], addr);
+    }
+    else{
+        for (int i = 15; i >= 0; i--){
+            regFlag = (a->list >> i) & 1;
             if(regFlag == 1){
                 tcg_gen_qemu_st_tl(cpu_r[i], addr, 0x00, MO_BEUL);
                 tcg_gen_addi_i32(addr, addr, 0x4);
@@ -4074,6 +4286,7 @@ static void avr32_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs){
     CPUAVR32AState *env = cs->env_ptr;
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     ctx->env = env;
+    ctx->cs = cs;
 
     ctx->pc = ctx->base.pc_first;
 }
@@ -4094,6 +4307,9 @@ static void avr32_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs){
     tcg_gen_movi_tl(cpu_r[PC_REG], ctx->base.pc_next);
 
     insn = decode_insn_load(ctx);
+    if (ctx->base.is_jmp == DISAS_NORETURN) {
+        return;
+    }
     if (!decode_insn(ctx, insn)) {
         error_report("[AVR32-TCG] avr32_tr_translate_insn, illegal instr, pc: 0x%04x\n", ctx->base.pc_next);
         gen_helper_raise_illegal_instruction(cpu_env);

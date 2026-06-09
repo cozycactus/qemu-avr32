@@ -20,6 +20,12 @@
 DEF_HELPER_1(raise_illegal_instruction, noreturn, env)
 DEF_HELPER_1(debug, noreturn, env)
 DEF_HELPER_1(break, noreturn, env)
+DEF_HELPER_0(avr32_count, i32)
+DEF_HELPER_1(avr32_tlb_flush, void, env)
+DEF_HELPER_3(avr32_tlb_miss, noreturn, env, i32, i32)
+DEF_HELPER_1(avr32_tlbs, void, env)
+DEF_HELPER_1(avr32_tlbw, void, env)
+DEF_HELPER_1(avr32_rete, void, env)
 DEF_HELPER_4(macsathhw, void, env, i32, i32, i32)
 
 #ifndef QEMU_AVR32_HELPER

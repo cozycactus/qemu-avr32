@@ -45,6 +45,9 @@ typedef struct AVR32EXPUSARTState {
     uint32_t tnpr;
     uint32_t tncr;
     uint32_t ptsr;
+    uint32_t rx_status;
+    uint8_t rx_byte;
+    bool rx_ready;
     unsigned irq;
 } AVR32EXPUSARTState;
 

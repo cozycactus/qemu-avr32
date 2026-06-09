@@ -76,6 +76,8 @@ typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 #define ATMEL_US_CSR 0x14
 #define ATMEL_US_RHR 0x18
 #define ATMEL_US_THR 0x1c
+#define ATMEL_US_NAME 0xf0
+#define ATMEL_US_VERSION 0xfc
 #define ATMEL_PDC_RPR 0x100
 #define ATMEL_PDC_RCR 0x104
 #define ATMEL_PDC_TPR 0x108
@@ -87,9 +89,15 @@ typedef struct AVR32EXPMcuClass AVR32EXPMcuClass;
 #define ATMEL_PDC_PTCR 0x120
 #define ATMEL_PDC_PTSR 0x124
 
+#define ATMEL_US_RSTRX BIT(2)
+#define ATMEL_US_RXEN BIT(4)
+#define ATMEL_US_RXDIS BIT(5)
+#define ATMEL_US_STTTO BIT(11)
 #define ATMEL_US_RXRDY BIT(0)
 #define ATMEL_US_TXRDY BIT(1)
+#define ATMEL_US_ENDRX BIT(3)
 #define ATMEL_US_ENDTX BIT(4)
+#define ATMEL_US_TIMEOUT BIT(8)
 #define ATMEL_US_TXEMPTY BIT(9)
 #define ATMEL_US_TXBUFE BIT(11)
 #define ATMEL_PDC_RXTEN BIT(0)
@@ -222,6 +230,10 @@ static uint32_t avr32exp_usart_status(AVR32EXPUSARTState *usart)
 {
     uint32_t status = ATMEL_US_TXRDY | ATMEL_US_TXEMPTY;
 
+    if (usart->rx_ready) {
+        status |= ATMEL_US_RXRDY;
+    }
+    status |= usart->rx_status;
     if (usart->tcr == 0) {
         status |= ATMEL_US_ENDTX;
     }
@@ -271,6 +283,50 @@ static void avr32exp_usart_drain_tx_pdc(AVR32EXPUSARTState *usart)
     avr32exp_usart_update_irq(usart);
 }
 
+static int avr32exp_usart_can_receive(void *opaque)
+{
+    AVR32EXPUSARTState *usart = opaque;
+
+    if ((usart->ptsr & ATMEL_PDC_RXTEN) && usart->rcr != 0) {
+        return usart->rcr;
+    }
+    return !usart->rx_ready;
+}
+
+static void avr32exp_usart_receive(void *opaque, const uint8_t *buf, int size)
+{
+    AVR32EXPUSARTState *usart = opaque;
+    int i;
+
+    for (i = 0; i < size; ++i) {
+        if ((usart->ptsr & ATMEL_PDC_RXTEN) && usart->rcr != 0) {
+            MemTxResult result;
+
+            address_space_stb(&address_space_memory, usart->rpr, buf[i],
+                              MEMTXATTRS_UNSPECIFIED, &result);
+            if (result != MEMTX_OK) {
+                continue;
+            }
+            usart->rpr++;
+            usart->rcr--;
+            usart->rx_status |= ATMEL_US_TIMEOUT;
+            if (usart->rcr == 0) {
+                usart->rx_status |= ATMEL_US_ENDRX;
+            }
+            continue;
+        }
+
+        if (usart->rx_ready) {
+            break;
+        }
+        usart->rx_byte = buf[i];
+        usart->rx_ready = true;
+    }
+
+    avr32exp_usart_update_irq(usart);
+    qemu_chr_fe_accept_input(&usart->chr);
+}
+
 static uint64_t avr32exp_usart_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
@@ -282,7 +338,19 @@ static uint64_t avr32exp_usart_read(void *opaque, hwaddr offset,
     case ATMEL_US_CSR:
         return avr32exp_usart_status(usart);
     case ATMEL_US_RHR:
+        if (usart->rx_ready) {
+            uint8_t ch = usart->rx_byte;
+
+            usart->rx_ready = false;
+            avr32exp_usart_update_irq(usart);
+            qemu_chr_fe_accept_input(&usart->chr);
+            return ch;
+        }
         return 0;
+    case ATMEL_US_NAME:
+        return 0x55534152; /* USAR(T) */
+    case ATMEL_US_VERSION:
+        return 0x302;
     case ATMEL_PDC_RPR:
         return usart->rpr;
     case ATMEL_PDC_RCR:
@@ -314,6 +382,18 @@ static void avr32exp_usart_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case ATMEL_US_CR:
+        if (value & (ATMEL_US_RSTRX | ATMEL_US_RXDIS)) {
+            usart->rx_ready = false;
+            usart->rx_status = 0;
+            qemu_chr_fe_accept_input(&usart->chr);
+        }
+        if (value & ATMEL_US_STTTO) {
+            usart->rx_status &= ~ATMEL_US_TIMEOUT;
+            avr32exp_usart_update_irq(usart);
+        }
+        if (value & ATMEL_US_RXEN) {
+            qemu_chr_fe_accept_input(&usart->chr);
+        }
         break;
     case ATMEL_US_IER:
         usart->imr |= value;
@@ -335,6 +415,10 @@ static void avr32exp_usart_write(void *opaque, hwaddr offset,
         break;
     case ATMEL_PDC_RCR:
         usart->rcr = value;
+        if (value != 0) {
+            usart->rx_status &= ~ATMEL_US_ENDRX;
+            qemu_chr_fe_accept_input(&usart->chr);
+        }
         break;
     case ATMEL_PDC_TPR:
         usart->tpr = value;
@@ -368,6 +452,7 @@ static void avr32exp_usart_write(void *opaque, hwaddr offset,
         }
         if (value & ATMEL_PDC_RXTEN) {
             usart->ptsr |= ATMEL_PDC_RXTEN;
+            qemu_chr_fe_accept_input(&usart->chr);
         }
         avr32exp_usart_update_irq(usart);
         break;
@@ -446,6 +531,8 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < ARRAY_SIZE(s->usart); i++) {
         s->usart[i].mcu = s;
         s->usart[i].irq = 6 + i;
+        s->usart[i].rx_status = 0;
+        s->usart[i].rx_ready = false;
         memory_region_init_io(&s->usart[i].iomem, OBJECT(dev),
                               &avr32exp_usart_ops, &s->usart[i],
                               usart_names[i], AVR32EXP_USART_SIZE);
@@ -463,6 +550,9 @@ static void avr32exp_realize(DeviceState *dev, Error **errp)
                      serial_hd(0) ?: qemu_chr_new("avr32-usart1-null",
                                                   "null", NULL),
                      &error_abort);
+    qemu_chr_fe_set_handlers(&s->usart[1].chr, avr32exp_usart_can_receive,
+                             avr32exp_usart_receive, NULL, NULL,
+                             &s->usart[1], NULL, true);
 }
 
 static void avr32exp_class_init(ObjectClass *oc, void *data)
